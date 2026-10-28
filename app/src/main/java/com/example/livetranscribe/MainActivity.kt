@@ -190,8 +190,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         if (useAndroid) {
             val r = recognizer
             recognizer = null
-            r?.stopListening()
-            handler.postDelayed({ r?.destroy() }, 1500)
+            try { r?.cancel() } catch (e: Exception) { }
+            handler.postDelayed({ try { r?.destroy() } catch (e: Exception) { } }, 500)
         } else {
             speechService?.stop()
             speechService?.shutdown()
@@ -218,12 +218,16 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     }
 
     // ---------- Android/Google-Engine ----------
+    private fun newRecognizer() {
+        try { recognizer?.destroy() } catch (e: Exception) { }
+        recognizer = SpeechRecognizer.createSpeechRecognizer(this).also {
+            it.setRecognitionListener(androidListener)
+        }
+    }
+
     private fun startAndroid() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             toast("Keine Spracherkennung auf diesem Gerät gefunden"); return
-        }
-                recognizer = (try { SpeechRecognizer.createSpeechRecognizer(this, android.content.ComponentName("com.google.android.googlequicksearchbox", "com.google.android.voicesearch.serviceapi.GoogleRecognitionService")) } catch (e: Exception) { SpeechRecognizer.createSpeechRecognizer(this) }).also {
-            it.setRecognitionListener(androidListener)
         }
         listening = true
         errorCount = 0
@@ -231,6 +235,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         btnToggle.text = "Aufnahme stoppen"
         status.text = "Hört zu (${lang.locale})…"
         refreshUi()
+        newRecognizer()
         listenOnce()
     }
 
@@ -245,10 +250,14 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         recognizer?.startListening(i)
     }
 
-    private fun restartAndroid() {
+    private fun restartAndroid(delayMs: Long) {
+        handler.removeCallbacksAndMessages(null)
         handler.postDelayed({
-            if (listening && useAndroid) listenOnce()
-        }, 400)
+            if (listening && useAndroid) {
+                newRecognizer()
+                listenOnce()
+            }
+        }, delayMs)
     }
 
     private val androidListener = object : SpeechListener {
@@ -272,25 +281,25 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                 ?.firstOrNull() ?: ""
             partial = ""
             addEntry(t)
-            if (listening) restartAndroid()
+            if (listening) restartAndroid(700)
         }
 
         override fun onError(error: Int) {
             partial = ""
+            if (!listening) return
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH,
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> if (listening) restartAndroid()
-                SpeechRecognizer.ERROR_CLIENT,
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                    if (listening) {
-                        errorCount++
-                        if (errorCount > 6) {
-                            toast("Wiederholter Fehler ($error) – Aufnahme gestoppt")
-                            stopEngine()
-                        } else restartAndroid()
-                    }
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> restartAndroid(700)
+                SpeechRecognizer.ERROR_CLIENT,       // 5
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY, // 8
+                10 -> {                               // zu viele Anfragen
+                    errorCount++
+                    if (errorCount > 5) {
+                        toast("Wiederholter Fehler ($error) – Aufnahme gestoppt")
+                        stopEngine()
+                    } else restartAndroid(1000L * errorCount + 500)
                 }
-                12, 13 -> { toast("Offline-Sprachpaket für ${lang.name} fehlt"); stopEngine() }
+                12, 13 -> { toast("Offline-Sprachpaket für ${lang.name} fehlt (Code $error)"); stopEngine() }
                 else -> { toast("Fehler Code $error"); stopEngine() }
             }
         }
@@ -367,7 +376,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
         muteBeep(false)
-        recognizer?.destroy()
+        try { recognizer?.destroy() } catch (e: Exception) { }
         speechService?.shutdown()
         translator?.close()
         model?.close()
