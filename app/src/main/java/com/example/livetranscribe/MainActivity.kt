@@ -1,10 +1,17 @@
 package com.example.livetranscribe
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.RecognitionListener as SpeechListener
 import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -27,7 +34,10 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private val sampleRate = 16000.0f
     private var model: Model? = null
     private var speechService: SpeechService? = null
+    private var recognizer: SpeechRecognizer? = null
+    private val handler = Handler(Looper.getMainLooper())
     private var listening = false
+    private var useAndroid = true
 
     private val finalText = StringBuilder()
     private var partial = ""
@@ -36,10 +46,11 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private lateinit var output: TextView
     private lateinit var scroll: ScrollView
     private lateinit var btnToggle: Button
+    private lateinit var btnEngine: Button
 
     private val micPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startListening() else toast("Mikrofon-Berechtigung nötig")
+            if (granted) startEngine() else toast("Mikrofon-Berechtigung nötig")
         }
 
     private val saveFile =
@@ -55,7 +66,15 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         scroll = findViewById(R.id.scroll)
         btnToggle = findViewById(R.id.btnToggle)
 
-        btnToggle.setOnClickListener { if (listening) stopListening() else requestAndStart() }
+        btnEngine = Button(this)
+        (status.parent as LinearLayout).addView(btnEngine, 1)
+        btnEngine.setOnClickListener {
+            if (listening) { toast("Erst Aufnahme stoppen"); return@setOnClickListener }
+            useAndroid = !useAndroid
+            refreshUi()
+        }
+
+        btnToggle.setOnClickListener { if (listening) stopEngine() else requestAndStart() }
         findViewById<Button>(R.id.btnClear).setOnClickListener {
             finalText.clear(); partial = ""; render()
         }
@@ -64,26 +83,29 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             val name = "Transkript_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.GERMANY).format(Date()) + ".txt"
             saveFile.launch(name)
         }
+        refreshUi()
         loadModel()
     }
 
-    /** Kopiert das Modell einmalig aus den Assets in den internen Speicher und lädt es. */
+    private fun refreshUi() {
+        btnEngine.text = if (useAndroid) "Engine: Android/Google (offline)  – tippen zum Wechseln"
+        else "Engine: Vosk (eigenes Modell)  – tippen zum Wechseln"
+        btnToggle.isEnabled = useAndroid || model != null
+        status.text = "Bereit"
+    }
+
     private fun loadModel() {
         thread {
             try {
                 val target = File(filesDir, "model-de")
                 if (!File(target, "am/final.mdl").exists()) {
-                    runOnUiThread { status.text = "Modell wird erstmalig entpackt…" }
                     target.deleteRecursively()
                     copyAssetDir("model-de", target)
                 }
                 model = Model(target.absolutePath)
-                runOnUiThread {
-                    status.text = "Bereit (offline)"
-                    btnToggle.isEnabled = true
-                }
+                runOnUiThread { refreshUi() }
             } catch (e: Exception) {
-                runOnUiThread { status.text = "Fehler beim Laden: ${e.message}" }
+                runOnUiThread { toast("Vosk-Modell Fehler: ${e.message}") }
             }
         }
     }
@@ -101,11 +123,104 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     private fun requestAndStart() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED) startListening()
+            == PackageManager.PERMISSION_GRANTED) startEngine()
         else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    private fun startListening() {
+    private fun startEngine() {
+        if (useAndroid) startAndroid() else startVosk()
+    }
+
+    private fun stopEngine() {
+        listening = false
+        handler.removeCallbacksAndMessages(null)
+        if (useAndroid) {
+            val r = recognizer
+            recognizer = null
+            r?.stopListening()
+            handler.postDelayed({ r?.destroy() }, 1500)
+        } else {
+            speechService?.stop()
+            speechService?.shutdown()
+            speechService = null
+        }
+        partial = ""
+        btnToggle.text = "Aufnahme starten"
+        status.text = "Bereit"
+        render()
+    }
+
+    // ---------- Android/Google-Engine ----------
+    private fun startAndroid() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            toast("Keine Spracherkennung auf diesem Gerät gefunden"); return
+        }
+        recognizer = SpeechRecognizer.createSpeechRecognizer(this).also {
+            it.setRecognitionListener(androidListener)
+        }
+        listening = true
+        btnToggle.text = "Aufnahme stoppen"
+        status.text = "Hört zu (Android)…"
+        listenOnce()
+    }
+
+    private fun listenOnce() {
+        val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "de-DE")
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+        recognizer?.startListening(i)
+    }
+
+    private fun restartAndroid() {
+        handler.postDelayed({
+            if (listening && useAndroid) {
+                recognizer?.cancel()
+                listenOnce()
+            }
+        }, 300)
+    }
+
+    private val androidListener = object : SpeechListener {
+        override fun onReadyForSpeech(params: Bundle?) {}
+        override fun onBeginningOfSpeech() {}
+        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onBufferReceived(buffer: ByteArray?) {}
+        override fun onEndOfSpeech() {}
+        override fun onEvent(eventType: Int, params: Bundle?) {}
+
+        override fun onPartialResults(partialResults: Bundle?) {
+            partial = partialResults
+                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: ""
+            render()
+        }
+
+        override fun onResults(results: Bundle?) {
+            val t = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.firstOrNull() ?: ""
+            if (t.isNotBlank()) finalText.append(t).append("\n")
+            partial = ""
+            render()
+            if (listening) restartAndroid()
+        }
+
+        override fun onError(error: Int) {
+            partial = ""
+            when (error) {
+                SpeechRecognizer.ERROR_NO_MATCH,
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> if (listening) restartAndroid()
+                12, 13 -> { toast("Deutsches Offline-Sprachpaket fehlt (siehe Anleitung)"); stopEngine() }
+                else -> { toast("Fehler Code $error"); stopEngine() }
+            }
+        }
+    }
+
+    // ---------- Vosk-Engine ----------
+    private fun startVosk() {
         val m = model ?: return
         try {
             speechService = SpeechService(Recognizer(m, sampleRate), sampleRate).also {
@@ -113,24 +228,12 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             }
             listening = true
             btnToggle.text = "Aufnahme stoppen"
-            status.text = "Hört zu…"
+            status.text = "Hört zu (Vosk)…"
         } catch (e: Exception) {
             toast("Fehler: ${e.message}")
         }
     }
 
-    private fun stopListening() {
-        speechService?.stop()
-        speechService?.shutdown()
-        speechService = null
-        listening = false
-        partial = ""
-        btnToggle.text = "Aufnahme starten"
-        status.text = "Bereit (offline)"
-        render()
-    }
-
-    // --- Vosk-Callbacks ---
     override fun onPartialResult(hypothesis: String?) {
         partial = JSONObject(hypothesis ?: "{}").optString("partial")
         render()
@@ -147,7 +250,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     override fun onError(e: Exception?) { toast("Fehler: ${e?.message}") }
     override fun onTimeout() {}
 
-    // --- UI & Datei ---
+    // ---------- UI & Datei ----------
     private fun currentText() = finalText.toString() + partial
 
     private fun render() {
@@ -170,6 +273,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        handler.removeCallbacksAndMessages(null)
+        recognizer?.destroy()
         speechService?.shutdown()
         model?.close()
     }
