@@ -244,12 +244,12 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     }
 
     private fun restartAndroid() {
+            private var errorCount = 0
+
+    private fun restartAndroid() {
         handler.postDelayed({
-            if (listening && useAndroid) {
-                recognizer?.cancel()
-                listenOnce()
-            }
-        }, 300)
+            if (listening && useAndroid) listenOnce()
+        }, 400)
     }
 
     private val androidListener = object : SpeechListener {
@@ -261,12 +261,14 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         override fun onEvent(eventType: Int, params: Bundle?) {}
 
         override fun onPartialResults(partialResults: Bundle?) {
+            errorCount = 0
             partial = partialResults
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: ""
             render()
         }
 
         override fun onResults(results: Bundle?) {
+            errorCount = 0
             val t = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull() ?: ""
             partial = ""
@@ -278,14 +280,22 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             partial = ""
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH,
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> if (listening) restartAndroid()
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> if (listening) restartAndroid()
+                SpeechRecognizer.ERROR_CLIENT,
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
+                    if (listening) {
+                        errorCount++
+                        if (errorCount > 6) {
+                            toast("Wiederholter Fehler ($error) – Aufnahme gestoppt")
+                            stopEngine()
+                        } else restartAndroid()
+                    }
+                }
                 12, 13 -> { toast("Offline-Sprachpaket für ${lang.name} fehlt"); stopEngine() }
                 else -> { toast("Fehler Code $error"); stopEngine() }
             }
         }
     }
-
     private fun addEntry(t: String) {
         if (t.isBlank()) { render(); return }
         val e = Entry(t)
