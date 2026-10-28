@@ -3,6 +3,7 @@ package com.example.livetranscribe
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -10,14 +11,23 @@ import android.os.Looper
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.RecognitionListener as SpeechListener
+import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.Translator
+import com.google.mlkit.nl.translate.TranslatorOptions
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -31,15 +41,27 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity(), RecognitionListener {
 
+    data class Lang(val name: String, val mlCode: String, val locale: String)
+    class Entry(val src: String, var de: String? = null)
+
+    private val langs = listOf(
+        Lang("Deutsch (keine Übersetzung)", TranslateLanguage.GERMAN, "de-DE"),
+        Lang("Türkisch → Deutsch", TranslateLanguage.TURKISH, "tr-TR"),
+        Lang("Koreanisch → Deutsch", TranslateLanguage.KOREAN, "ko-KR")
+    )
+    private var lang = langs[0]
+
     private val sampleRate = 16000.0f
     private var model: Model? = null
     private var speechService: SpeechService? = null
     private var recognizer: SpeechRecognizer? = null
+    private var translator: Translator? = null
     private val handler = Handler(Looper.getMainLooper())
     private var listening = false
     private var useAndroid = true
+    private var muted = false
 
-    private val finalText = StringBuilder()
+    private val entries = mutableListOf<Entry>()
     private var partial = ""
 
     private lateinit var status: TextView
@@ -47,6 +69,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private lateinit var scroll: ScrollView
     private lateinit var btnToggle: Button
     private lateinit var btnEngine: Button
+    private lateinit var spinner: Spinner
 
     private val micPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -66,17 +89,30 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         scroll = findViewById(R.id.scroll)
         btnToggle = findViewById(R.id.btnToggle)
 
+        val root = status.parent as LinearLayout
         btnEngine = Button(this)
-        (status.parent as LinearLayout).addView(btnEngine, 1)
+        root.addView(btnEngine, 1)
+        spinner = Spinner(this)
+        root.addView(spinner, 2)
+
+        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, langs.map { it.name })
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                lang = langs[pos]
+                setupTranslator()
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+
         btnEngine.setOnClickListener {
             if (listening) { toast("Erst Aufnahme stoppen"); return@setOnClickListener }
             useAndroid = !useAndroid
+            if (!useAndroid) spinner.setSelection(0)
             refreshUi()
         }
-
         btnToggle.setOnClickListener { if (listening) stopEngine() else requestAndStart() }
         findViewById<Button>(R.id.btnClear).setOnClickListener {
-            finalText.clear(); partial = ""; render()
+            entries.clear(); partial = ""; render()
         }
         findViewById<Button>(R.id.btnSave).setOnClickListener {
             if (currentText().isBlank()) { toast("Kein Text vorhanden"); return@setOnClickListener }
@@ -89,9 +125,26 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     private fun refreshUi() {
         btnEngine.text = if (useAndroid) "Engine: Android/Google (offline)  – tippen zum Wechseln"
-        else "Engine: Vosk (eigenes Modell)  – tippen zum Wechseln"
+        else "Engine: Vosk (nur Deutsch)  – tippen zum Wechseln"
         btnToggle.isEnabled = useAndroid || model != null
-        status.text = "Bereit"
+        spinner.isEnabled = useAndroid && !listening
+    }
+
+    /** Lädt das Übersetzungsmodell (einmalig mit Internet nötig). */
+    private fun setupTranslator() {
+        translator?.close()
+        translator = null
+        if (lang.mlCode == TranslateLanguage.GERMAN) { status.text = "Bereit"; return }
+        val opts = TranslatorOptions.Builder()
+            .setSourceLanguage(lang.mlCode)
+            .setTargetLanguage(TranslateLanguage.GERMAN)
+            .build()
+        val tr = Translation.getClient(opts)
+        translator = tr
+        status.text = "Übersetzungsmodell wird geladen…"
+        tr.downloadModelIfNeeded(DownloadConditions.Builder().build())
+            .addOnSuccessListener { status.text = "Bereit (Übersetzung offline)" }
+            .addOnFailureListener { status.text = "Modell fehlt – einmal mit Internet öffnen" }
     }
 
     private fun loadModel() {
@@ -127,9 +180,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    private fun startEngine() {
-        if (useAndroid) startAndroid() else startVosk()
-    }
+    private fun startEngine() { if (useAndroid) startAndroid() else startVosk() }
 
     private fun stopEngine() {
         listening = false
@@ -144,10 +195,25 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             speechService?.shutdown()
             speechService = null
         }
+        muteBeep(false)
         partial = ""
         btnToggle.text = "Aufnahme starten"
         status.text = "Bereit"
+        refreshUi()
         render()
+    }
+
+    /** Schaltet die Medienlautstärke stumm, damit der Erkennungs-Piepton nicht zu hören ist. */
+    private fun muteBeep(on: Boolean) {
+        if (on == muted) return
+        try {
+            val am = getSystemService(AUDIO_SERVICE) as AudioManager
+            am.adjustStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                if (on) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE, 0
+            )
+            muted = on
+        } catch (e: Exception) { }
     }
 
     // ---------- Android/Google-Engine ----------
@@ -159,15 +225,17 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             it.setRecognitionListener(androidListener)
         }
         listening = true
+        muteBeep(true)
         btnToggle.text = "Aufnahme stoppen"
-        status.text = "Hört zu (Android)…"
+        status.text = "Hört zu (${lang.locale})…"
+        refreshUi()
         listenOnce()
     }
 
     private fun listenOnce() {
         val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "de-DE")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang.locale)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
@@ -201,9 +269,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         override fun onResults(results: Bundle?) {
             val t = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull() ?: ""
-            if (t.isNotBlank()) finalText.append(t).append("\n")
             partial = ""
-            render()
+            addEntry(t)
             if (listening) restartAndroid()
         }
 
@@ -213,13 +280,26 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> if (listening) restartAndroid()
-                12, 13 -> { toast("Deutsches Offline-Sprachpaket fehlt (siehe Anleitung)"); stopEngine() }
+                12, 13 -> { toast("Offline-Sprachpaket für ${lang.name} fehlt"); stopEngine() }
                 else -> { toast("Fehler Code $error"); stopEngine() }
             }
         }
     }
 
-    // ---------- Vosk-Engine ----------
+    private fun addEntry(t: String) {
+        if (t.isBlank()) { render(); return }
+        val e = Entry(t)
+        entries.add(e)
+        val tr = translator
+        if (tr != null) {
+            tr.translate(t)
+                .addOnSuccessListener { e.de = it; render() }
+                .addOnFailureListener { e.de = "(Übersetzung fehlgeschlagen)"; render() }
+        }
+        render()
+    }
+
+    // ---------- Vosk-Engine (nur Deutsch) ----------
     private fun startVosk() {
         val m = model ?: return
         try {
@@ -229,6 +309,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             listening = true
             btnToggle.text = "Aufnahme stoppen"
             status.text = "Hört zu (Vosk)…"
+            refreshUi()
         } catch (e: Exception) {
             toast("Fehler: ${e.message}")
         }
@@ -240,10 +321,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     }
 
     override fun onResult(hypothesis: String?) {
-        val t = JSONObject(hypothesis ?: "{}").optString("text")
-        if (t.isNotBlank()) finalText.append(t).append("\n")
         partial = ""
-        render()
+        addEntry(JSONObject(hypothesis ?: "{}").optString("text"))
     }
 
     override fun onFinalResult(hypothesis: String?) = onResult(hypothesis)
@@ -251,7 +330,10 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     override fun onTimeout() {}
 
     // ---------- UI & Datei ----------
-    private fun currentText() = finalText.toString() + partial
+    private fun currentText(): String =
+        entries.joinToString("") {
+            if (it.de != null) "${it.src}\n→ ${it.de}\n\n" else "${it.src}\n"
+        } + partial
 
     private fun render() {
         runOnUiThread {
@@ -274,8 +356,10 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
+        muteBeep(false)
         recognizer?.destroy()
         speechService?.shutdown()
+        translator?.close()
         model?.close()
     }
 }
