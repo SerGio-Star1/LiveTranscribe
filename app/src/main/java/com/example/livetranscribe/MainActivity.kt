@@ -60,6 +60,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private var listening = false
     private var useAndroid = true
     private var muted = false
+    private var errorCount = 0
 
     private val entries = mutableListOf<Entry>()
     private var partial = ""
@@ -130,7 +131,6 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         spinner.isEnabled = useAndroid && !listening
     }
 
-    /** Lädt das Übersetzungsmodell (einmalig mit Internet nötig). */
     private fun setupTranslator() {
         translator?.close()
         translator = null
@@ -180,7 +180,9 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    private fun startEngine() { if (useAndroid) startAndroid() else startVosk() }
+    private fun startEngine() {
+        if (useAndroid) startAndroid() else startVosk()
+    }
 
     private fun stopEngine() {
         listening = false
@@ -203,7 +205,6 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         render()
     }
 
-    /** Schaltet die Medienlautstärke stumm, damit der Erkennungs-Piepton nicht zu hören ist. */
     private fun muteBeep(on: Boolean) {
         if (on == muted) return
         try {
@@ -225,6 +226,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             it.setRecognitionListener(androidListener)
         }
         listening = true
+        errorCount = 0
         muteBeep(true)
         btnToggle.text = "Aufnahme stoppen"
         status.text = "Hört zu (${lang.locale})…"
@@ -242,9 +244,6 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         }
         recognizer?.startListening(i)
     }
-
-    private fun restartAndroid() {
-            private var errorCount = 0
 
     private fun restartAndroid() {
         handler.postDelayed({
@@ -296,6 +295,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             }
         }
     }
+
     private fun addEntry(t: String) {
         if (t.isBlank()) { render(); return }
         val e = Entry(t)
