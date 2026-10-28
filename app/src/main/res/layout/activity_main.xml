@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="16dp">
+
+    <TextView android:id="@+id/status" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:text="Modell wird geladen…"
+        android:paddingBottom="8dp" />
+
+    <ScrollView android:id="@+id/scroll" android:layout_width="match_parent"
+        android:layout_height="0dp" android:layout_weight="1">
+        <TextView android:id="@+id/output" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:textSize="18sp"
+            android:textIsSelectable="true" />
+    </ScrollView>
+
+    <Button android:id="@+id/btnToggle" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:text="Aufnahme starten"
+        android:enabled="false" />
+
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal">
+        <Button android:id="@+id/btnSave" android:layout_width="0dp"
+            android:layout_height="wrap_content" android:layout_weight="1"
+            android:text="Als Datei speichern" />
+        <Button android:id="@+id/btnClear" android:layout_width="0dp"
+            android:layout_height="wrap_content" android:layout_weight="1"
+            android:text="Löschen" />
+    </LinearLayout>
+</LinearLayout>
