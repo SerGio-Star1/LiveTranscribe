@@ -222,7 +222,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             toast("Keine Spracherkennung auf diesem Gerät gefunden"); return
         }
-        recognizer = SpeechRecognizer.createSpeechRecognizer(this).also {
+                recognizer = (try { SpeechRecognizer.createSpeechRecognizer(this, android.content.ComponentName("com.google.android.googlequicksearchbox", "com.google.android.voicesearch.serviceapi.GoogleRecognitionService")) } catch (e: Exception) { SpeechRecognizer.createSpeechRecognizer(this) }).also {
             it.setRecognitionListener(androidListener)
         }
         listening = true
